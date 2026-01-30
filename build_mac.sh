@@ -29,7 +29,7 @@ echo "Building macOS application..."
 echo ""
 
 # Build the macOS app (no --icon so PyInstaller doesn't look for a file named "NONE")
-python3 -m PyInstaller --onefile \
+python3 -m pyinstaller --onefile \
     --windowed \
     --name "EventFileGenerator" \
     event_folder_generator.py
@@ -51,3 +51,4 @@ echo ""
 echo "You can now distribute this application to any macOS computer"
 echo "without requiring Python to be installed."
 echo ""
+
