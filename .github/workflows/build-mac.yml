@@ -1,0 +1,51 @@
+# Build Event File Generator for macOS (runs on GitHub's Mac runners)
+name: Build for macOS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build macOS app
+        run: |
+          test -f EventFileGenerator.spec
+          test -f event_folder_generator.py
+          python -m PyInstaller --noconfirm --clean EventFileGenerator.spec
+
+      - name: Package app
+        run: |
+          cd dist
+          ls -la
+          if [ -d EventFileGenerator.app ]; then
+            ditto -c -k --keepParent EventFileGenerator.app EventFileGenerator-macOS.zip
+          elif [ -f EventFileGenerator ]; then
+            zip EventFileGenerator-macOS.zip EventFileGenerator
+          else
+            echo "No build output found in dist/"
+            exit 1
+          fi
+
+      - name: Upload Mac artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: EventFileGenerator-macOS
+          path: dist/EventFileGenerator-macOS.zip

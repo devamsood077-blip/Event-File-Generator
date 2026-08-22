@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+dist/
+*.exe
+*.app
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local machine settings (template/destination paths)
+event_generator_config.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
