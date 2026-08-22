@@ -1,81 +1,58 @@
-# Event File Generator - Complete Package
+# Event File Generator
 
-This folder contains all files for the Event File Generator application.
+This folder contains all files for the Event File Generator application, organized as follows.
 
-## Contents
+## Folder structure
 
-### Executable (Ready to Use)
-- **`dist/EventFileGenerator.exe`** - Standalone Windows executable (no Python required)
-- **`dist/event_generator_config.json`** - Configuration file (created automatically)
+```
+Event File Generator/
+├── event_folder_generator.py   # Main application (source)
+├── requirements.txt             # Python dependencies (PyInstaller)
+├── EventFileGenerator.spec      # PyInstaller spec (optional)
+├── event_generator_config.json  # Saved settings (created on first run)
+├── README.md                    # This file
+├── docs/                        # Documentation
+│   ├── BUILD_INSTRUCTIONS.md    # How to build the Windows EXE
+│   ├── BUILD_INSTRUCTIONS_MAC.md # How to build the macOS app
+│   ├── EVENT_GENERATOR_README.md # User guide
+│   └── THEME_COLORS.md          # Theme/color reference
+├── scripts/                     # Build and run scripts
+│   ├── build_exe.bat            # Build Windows EXE
+│   ├── build_exe_clean.bat      # Clean build (Windows)
+│   ├── build_mac.sh             # Build macOS app
+│   ├── build_mac_clean.sh       # Clean build (macOS)
+│   └── run_event_generator.bat  # Run from source (Windows)
+├── dist/                        # Built executables (after build)
+└── build/                       # PyInstaller cache (can delete)
+```
 
-### Source Code
-- **`event_folder_generator.py`** - Main Python application source code
+## Quick start
 
-### Build Scripts (Windows)
-- **`build_exe.bat`** - Build the EXE from source
-- **`build_exe_clean.bat`** - Clean build (removes old files first)
-- **`run_event_generator.bat`** - Run the Python script directly (requires Python)
+### Windows
 
-### Build Scripts (macOS)
-- **`build_mac.sh`** - Build the macOS app from source
-- **`build_mac_clean.sh`** - Clean build for macOS (removes old files first)
+- **Run from source:** Double-click `scripts/run_event_generator.bat` or run `python event_folder_generator.py` from this folder.
+- **Build EXE:** Double-click `scripts/build_exe.bat`. The EXE will be in `dist/EventFileGenerator.exe`.
+- **Use pre-built EXE:** Run `dist/EventFileGenerator.exe` (no Python needed).
 
-### Configuration
-- **`EventFileGenerator.spec`** - PyInstaller build specification
-- **`requirements.txt`** - Python dependencies (only PyInstaller needed)
+### macOS
 
-### Documentation
-- **`EVENT_GENERATOR_README.md`** - User guide and instructions
-- **`BUILD_INSTRUCTIONS.md`** - How to build the Windows EXE from source
-- **`BUILD_INSTRUCTIONS_MAC.md`** - How to build the macOS app from source
-- **`THEME_COLORS.md`** - Color customization reference
+- **Run from source:** From this folder, run `python3 event_folder_generator.py`.
+- **Build app:** From this folder, run `chmod +x scripts/build_mac.sh` (once), then `./scripts/build_mac.sh`. The app will be in `dist/EventFileGenerator.app`.
+- **No Mac?** Push the repo to GitHub and run **Actions → Build for macOS**. Download the `EventFileGenerator-macOS` artifact.
 
-## Quick Start
+## Documentation
 
-### Windows Users
-
-#### Option 1: Use the Pre-built EXE (Recommended)
-1. Navigate to the `dist` folder
-2. Double-click `EventFileGenerator.exe`
-3. No Python installation required!
-
-#### Option 2: Run from Source
-1. Make sure Python 3.7+ is installed
-2. Double-click `run_event_generator.bat`
-3. Or run: `python event_folder_generator.py`
-
-#### Option 3: Rebuild the EXE
-1. Double-click `build_exe.bat`
-2. Wait for build to complete
-3. Find the new EXE in `dist/EventFileGenerator.exe`
-
-### macOS Users
-
-#### Option 1: Run from Source
-1. Make sure Python 3.7+ is installed (`python3 --version`)
-2. Open Terminal and navigate to this folder
-3. Run: `python3 event_folder_generator.py`
-
-#### Option 2: Build macOS App
-1. Open Terminal and navigate to this folder
-2. Make script executable: `chmod +x build_mac.sh`
-3. Run: `./build_mac.sh`
-4. Find the app at: `dist/EventFileGenerator`
+- **User guide:** `docs/EVENT_GENERATOR_README.md`
+- **Windows build:** `docs/BUILD_INSTRUCTIONS.md`
+- **macOS build:** `docs/BUILD_INSTRUCTIONS_MAC.md`
+- **Theme/colors:** `docs/THEME_COLORS.md`
 
 ## Distribution
 
-### Windows
-- Copy the entire `dist` folder to any Windows computer
-- Users can run `EventFileGenerator.exe` directly
-- No additional files or installations needed
-
-### macOS
-- Copy `dist/EventFileGenerator` to any Mac
-- Users can run it directly (may need to right-click and "Open" first time due to Gatekeeper)
-- No additional files or installations needed
+- **Windows:** Copy `dist/EventFileGenerator.exe` (and optionally `dist/event_generator_config.json`) to any Windows PC.
+- **macOS:** Copy `dist/EventFileGenerator.app` to any Mac (right-click → Open the first time if Gatekeeper warns).
 
 ## Notes
 
-- The config file (`event_generator_config.json`) will be created automatically when you first run the application
-- Settings are saved between sessions
-- The EXE is completely standalone - no Python or dependencies required
+- Config file `event_generator_config.json` is created automatically on first run.
+- Build scripts in `scripts/` change to the app root automatically; run them from anywhere or double-click them.

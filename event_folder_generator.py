@@ -12,6 +12,185 @@ from pathlib import Path
 import threading
 import sys
 import json
+import customtkinter as ctk
+from PIL import Image, ImageDraw
+
+LAYOUT_PREVIEWS = {
+    '2X6_overlay_layout': {
+        'file': '2X6_overlay_layout.png',
+        'slots': [
+            (0.041, 0.027, 0.419, 0.195), (0.525, 0.027, 0.435, 0.195),
+            (0.041, 0.238, 0.419, 0.195), (0.525, 0.238, 0.435, 0.195),
+            (0.041, 0.450, 0.419, 0.195), (0.525, 0.450, 0.435, 0.195),
+            (0.041, 0.662, 0.419, 0.194), (0.525, 0.662, 0.435, 0.194),
+        ],
+    },
+    '4X6_1_shot_horizontal': {
+        'file': '4X6_1_shot_horizontal.png',
+        'slots': [(0.012, 0.016, 0.977, 0.968)],
+    },
+    '4X6_1_shot_vertical': {
+        'file': '4X6_1_shot_vertical.png',
+        'slots': [(0.036, 0.020, 0.935, 0.952)],
+    },
+    '4X6_3_shot_vertical': {
+        'file': '4X6_3_shot_vertical.png',
+        'slots': [
+            (0.041, 0.027, 0.919, 0.499),
+            (0.041, 0.542, 0.435, 0.195),
+            (0.525, 0.542, 0.435, 0.195),
+        ],
+    },
+    '4X6_4_shot': {
+        'file': '4X6_4_shot.png',
+        'slots': [
+            (0.027, 0.041, 0.304, 0.301),
+            (0.348, 0.041, 0.305, 0.301),
+            (0.669, 0.041, 0.304, 0.301),
+            (0.027, 0.368, 0.597, 0.592),
+        ],
+    },
+}
+
+
+LAYOUT_DISPLAY_NAMES = {
+    '2X6_overlay_layout': '2×6 Strip',
+    '4X6_1_shot_horizontal': '4×6 — 1 Shot Horizontal',
+    '4X6_1_shot_vertical': '4×6 — 1 Shot Vertical',
+    '4X6_3_shot_vertical': '4×6 — 3 Shot',
+    '4X6_4_shot': '4×6 — 4 Shot',
+}
+
+
+def get_layout_previews_dir():
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS) / 'assets' / 'layout_previews'
+    return Path(__file__).parent / 'assets' / 'layout_previews'
+
+
+EMPTY_SLOT_COLOR = (156, 163, 175)  # Visible gray for empty photo slots
+
+
+def is_layout_slot_fill(r, g, b):
+    """Gray slot fill only — preserve black/white labels and borders."""
+    return 30 <= r <= 50 and 30 <= g <= 50 and 30 <= b <= 50
+
+
+def is_layout_interior_fill(r, g, b):
+    """Near-black interior used by 1-shot layout templates."""
+    return r <= 12 and g <= 12 and b <= 12
+
+
+def layout_overlay_with_holes(layout_img, layout_key):
+    rgba = layout_img.convert('RGBA')
+    px = rgba.load()
+    w, h = rgba.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if is_layout_slot_fill(r, g, b) or (
+                layout_key in ('4X6_1_shot_horizontal', '4X6_1_shot_vertical')
+                and is_layout_interior_fill(r, g, b)
+            ):
+                px[x, y] = (r, g, b, 0)
+    return rgba
+
+
+def fill_slot_placeholder(canvas, box, color=EMPTY_SLOT_COLOR):
+    x, y, w, h = box
+    if w > 0 and h > 0:
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle((x, y, x + w - 1, y + h - 1), fill=color)
+
+
+def paste_slot_backgrounds(canvas, layout_key, slot_background_map, transparent_base=False):
+    """Draw uploaded backgrounds into layout slot areas."""
+    w, h = canvas.size
+    slots = LAYOUT_PREVIEWS[layout_key]['slots']
+    empty_fill = (0, 0, 0, 0) if transparent_base else (*EMPTY_SLOT_COLOR, 255)
+
+    for slot_idx, slot_rect in enumerate(slots):
+        bg_path = slot_background_map.get(slot_idx)
+        if not bg_path:
+            continue
+        try:
+            x = int(slot_rect[0] * w)
+            y = int(slot_rect[1] * h)
+            sw = int(slot_rect[2] * w)
+            sh = int(slot_rect[3] * h)
+            slot_fill = Image.new('RGBA', (sw, sh), empty_fill)
+            paste_cover(slot_fill, Image.open(bg_path), (0, 0, sw, sh))
+            canvas.paste(slot_fill, (x, y), slot_fill)
+        except Exception:
+            continue
+
+
+def paste_full_background(canvas, bg_path):
+    """Scale a background image to cover the entire canvas."""
+    w, h = canvas.size
+    if w <= 0 or h <= 0:
+        return
+    paste_cover(canvas, Image.open(bg_path), (0, 0, w, h))
+
+
+def build_layout_composite(layout_key, layout_path, slot_background_map, full_background_path=None):
+    """Layout preview (bottom) → backgrounds (top). Used when no overlay is available."""
+    layout_layer = Image.open(layout_path).convert('RGBA')
+    background_layer = Image.new('RGBA', layout_layer.size, (0, 0, 0, 0))
+    if full_background_path:
+        paste_full_background(background_layer, full_background_path)
+    elif slot_background_map:
+        paste_slot_backgrounds(
+            background_layer, layout_key, slot_background_map, transparent_base=True
+        )
+
+    composite = layout_layer.copy()
+    composite.alpha_composite(background_layer)
+    return composite
+
+
+def build_combined_preview(
+    layout_key, layout_path, slot_background_map, overlay_path, full_background_path=None
+):
+    """Layout preview (bottom) → backgrounds (middle) → overlay (top)."""
+    overlay_layer = Image.open(overlay_path).convert('RGBA')
+    ow, oh = overlay_layer.size
+
+    layout_layer = Image.open(layout_path).convert('RGBA')
+    if layout_layer.size != (ow, oh):
+        layout_layer = layout_layer.resize((ow, oh), Image.Resampling.LANCZOS)
+
+    background_layer = Image.new('RGBA', (ow, oh), (0, 0, 0, 0))
+    if full_background_path:
+        paste_full_background(background_layer, full_background_path)
+    elif slot_background_map:
+        paste_slot_backgrounds(
+            background_layer, layout_key, slot_background_map, transparent_base=True
+        )
+
+    composite = layout_layer.copy()
+    composite.alpha_composite(background_layer)
+    composite.alpha_composite(overlay_layer)
+    return composite
+
+
+def paste_cover(canvas, image, box):
+    x, y, w, h = box
+    if w <= 0 or h <= 0:
+        return
+    img = image.convert('RGBA') if canvas.mode == 'RGBA' else image.convert('RGB')
+    scale = max(w / img.width, h / img.height)
+    nw = max(1, int(img.width * scale))
+    nh = max(1, int(img.height * scale))
+    resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    left = (nw - w) // 2
+    top = (nh - h) // 2
+    cropped = resized.crop((left, top, left + w, top + h))
+    if canvas.mode == 'RGBA' and cropped.mode == 'RGBA':
+        canvas.paste(cropped, (x, y), cropped)
+    else:
+        canvas.paste(cropped.convert('RGB'), (x, y))
+
 
 # System theme detection (Windows and macOS)
 def get_system_theme():
@@ -58,13 +237,153 @@ def get_system_theme():
         return 'light'
 
 
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+class RoundedDropdown(ctk.CTkFrame):
+    """Dropdown that opens a rounded menu popup instead of the native sharp menu."""
+
+    def __init__(self, master, variable, values=None, command=None, state="normal",
+                 width=200, height=36, corner_radius=8, fg_color=None, border_color=None,
+                 text_color=None, font=None, **kwargs):
+        super().__init__(master, fg_color=fg_color or ("#2d2e3a", "#2d2e3a"), corner_radius=corner_radius,
+                         border_width=1, border_color=border_color or "#3f3f46", width=width, height=height, **kwargs)
+        self._variable = variable
+        self._values = list(values or [])
+        self._command = command
+        self._state = "normal" if state == "readonly" else state
+        self._width = width
+        self._height = height
+        self._corner_radius = corner_radius
+        self._text_color = text_color or "#e4e4e7"
+        self._font = font or ("Segoe UI", 10)
+        self._popup = None
+        self.grid_propagate(False)
+        self._label = ctk.CTkLabel(
+            self, text=self._variable.get() or "Select...", anchor="w", width=width - 30, height=height - 8,
+            text_color=self._text_color, font=self._font,
+            fg_color="transparent"
+        )
+        self._label.place(relx=0, rely=0, x=10, y=2)
+        self._label.bind("<Button-1>", self._on_click)
+        self._label.configure(cursor="hand2")
+        self.bind("<Button-1>", self._on_click)
+        self.configure(cursor="hand2")
+        self._variable.trace_add("write", self._on_var_write)
+
+    def _on_var_write(self, *args):
+        self._label.configure(text=self._variable.get() or "Select...")
+
+    def _on_click(self, event=None):
+        if self._state == "disabled" or not self._values:
+            return
+        self._show_popup()
+
+    def _show_popup(self):
+        if self._popup is not None and self._popup.winfo_exists():
+            self._popup.destroy()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 2
+        popup_width = max(self._width, 120)
+        max_h = 280
+        item_h = 36
+        n = len(self._values)
+        popup_height = min(n * item_h + 12, max_h)
+        self._popup = ctk.CTkToplevel(self)
+        self._popup.overrideredirect(True)
+        self._popup.geometry(f"{popup_width}x{popup_height}+{x}+{y}")
+        self._popup.attributes("-topmost", True)
+        self._popup.withdraw()
+        try:
+            fg = self.cget("fg_color")
+            bd = self.cget("border_color")
+        except Exception:
+            fg = "#2d2e3a"
+            bd = "#3f3f46"
+        frame = ctk.CTkFrame(
+            self._popup, fg_color=fg, corner_radius=self._corner_radius,
+            border_width=1, border_color=bd
+        )
+        frame.place(x=0, y=0, relwidth=1, relheight=1)
+        scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent", corner_radius=max(0, self._corner_radius - 2),
+                                       width=popup_width - 16, height=popup_height - 16)
+        scroll.place(x=6, y=6)
+        for v in self._values:
+            btn = ctk.CTkButton(
+                scroll, text=v, anchor="w", height=32, fg_color="transparent",
+                hover_color=("#3d3e4a", "#3d3e4a"), text_color=self._text_color,
+                font=self._font, corner_radius=6,
+                command=lambda val=v: self._select(val)
+            )
+            btn.pack(fill="x", pady=1)
+        self._popup.deiconify()
+        self._popup.focus_set()
+        self._popup.bind("<Escape>", self._close_popup)
+        # Delay binding FocusOut so clicking an option is processed first
+        self._popup.after(150, lambda: self._popup.bind("<FocusOut>", self._delayed_close))
+
+    def _delayed_close(self, event=None):
+        """Close popup after a short delay so focus has settled (avoids closing on button click)."""
+        if self._popup and self._popup.winfo_exists():
+            self._popup.after(100, self._close_popup)
+
+    def _select(self, value):
+        self._variable.set(value)
+        if self._command:
+            self._command(value)
+        self._close_popup()
+
+    def _close_popup(self, event=None):
+        if self._popup and self._popup.winfo_exists():
+            try:
+                self._popup.unbind("<FocusOut>")
+            except Exception:
+                pass
+            try:
+                self._popup.unbind("<Escape>")
+            except Exception:
+                pass
+            self._popup.destroy()
+            self._popup = None
+
+    def configure(self, **kwargs):
+        if "values" in kwargs:
+            self._values = list(kwargs.pop("values"))
+        if "state" in kwargs:
+            s = kwargs.pop("state")
+            self._state = "normal" if s == "readonly" else s
+        if "variable" in kwargs:
+            self._variable = kwargs.pop("variable")
+            self._label.configure(text=self._variable.get() or "Select...")
+        super().configure(**kwargs)
+
+    def cget(self, key):
+        if key == "values":
+            return self._values
+        if key == "state":
+            return self._state
+        if key == "variable":
+            return self._variable
+        return super().cget(key)
+
+    def get(self):
+        return self._variable.get()
+
+    def set(self, value):
+        self._variable.set(value)
+
+
 class EventFolderGenerator:
     def __init__(self, root):
         self.root = root
         self.root.title("Event File Generator")
-        self.root.geometry("600x650")
+        self.window_width = 920
+        self.preview_panel_width = 300
+        self.base_height = 840  # Base height without optional sections
+        self.layout_choice_index = 0
+        self.root.geometry(f"{self.window_width}x{self.base_height}")
         self.root.resizable(False, True)  # Allow vertical resizing
-        self.base_height = 650  # Base height without optional sections
         
         # Config file path for saving state
         # Handle both script and EXE modes
@@ -90,6 +409,8 @@ class EventFolderGenerator:
         self.overlay_file_path = tk.StringVar()
         self.overlay_background_file_path = tk.StringVar()
         self.background_files = []  # List to store background file paths
+        self._preview_image = None
+        self._preview_pil = None
         
         # Load saved state
         self.load_state()
@@ -103,45 +424,64 @@ class EventFolderGenerator:
     
     def setup_theme(self):
         """Setup color theme based on Windows theme."""
+        ctk.set_appearance_mode("dark" if self.theme == "dark" else "light")
         if self.theme == 'dark':
-            # DARK THEME COLORS - Customize these hex codes:
+            # DARK THEME COLORS - soft gradients, modern
             self.colors = {
-                'bg_main': '#1e1e1e',           # Main background
-                'bg_frame': '#252526',           # Frame background
-                'bg_entry': '#889C9B',           # Entry field background
-                'bg_button': '#3B3936',          # Button background
-                'bg_button_hover': '#4a4845',    # Button hover
-                'fg_button': '#B2BEBF',          # Button text color
-                'fg_text': '#cccccc',            # Text color
-                'fg_label': '#ffffff',           # Label text color
-                'fg_entry': '#1a1a1a',           # Entry text color (dark for contrast)
-                'border': '#3c3c3c',             # Border color
-                'accent': '#0078d4',             # Accent color
-                'status_success': '#4ec9b0',     # Success status color
-                'status_error': '#f48771',      # Error status color
-                'status_warning': '#ce9178',     # Warning status color
+                'bg_main': '#1a1b26',           # Main background
+                'bg_frame': '#252631',           # Frame / card background
+                'bg_entry': '#2d2e3a',           # Entry field background
+                'bg_button': '#3d3e4a',          # Secondary button
+                'bg_button_hover': '#4d4e5a',   # Button hover
+                'fg_button': '#e4e4e7',         # Button text
+                'fg_text': '#a1a1aa',           # Muted text
+                'fg_label': '#fafafa',          # Label text
+                'fg_entry': '#e4e4e7',          # Entry text
+                'border': '#3f3f46',            # Border
+                'accent': '#0078d4',             # Accent / primary
+                'primary': '#486966',            # Primary action (generate)
+                'primary_hover': '#5a7a77',     # Primary hover
+                'status_success': '#22c55e',    # Success (green)
+                'status_success_bg': '#14532d',  # Success alert bg
+                'status_error': '#ef4444',     # Error (red)
+                'status_error_bg': '#450a0a',   # Error alert bg
+                'status_warning': '#f59e0b',   # Warning (amber)
+                'status_warning_bg': '#422006', # Warning alert bg
+                'status_info_bg': '#1e3a5f',   # Info / default alert bg
             }
         else:
-            # LIGHT THEME COLORS - Customize these hex codes:
+            # LIGHT THEME COLORS
             self.colors = {
-                'bg_main': '#ffffff',           # Main background
-                'bg_frame': '#f3f3f3',           # Frame background
-                'bg_entry': '#889C9B',           # Entry field background
-                'bg_button': '#3B3936',          # Button background
-                'bg_button_hover': '#4a4845',    # Button hover
-                'fg_button': '#B2BEBF',          # Button text color
-                'fg_text': '#323130',            # Text color
-                'fg_label': '#201f1e',           # Label text color
-                'fg_entry': '#1a1a1a',           # Entry text color (dark for contrast)
-                'border': '#edebe9',             # Border color
-                'accent': '#0078d4',             # Accent color
-                'status_success': '#107c10',     # Success status color
-                'status_error': '#d13438',       # Error status color
-                'status_warning': '#ffaa44',     # Warning status color
+                'bg_main': '#f8fafc',
+                'bg_frame': '#f1f5f9',
+                'bg_entry': '#ffffff',
+                'bg_button': '#e2e8f0',
+                'bg_button_hover': '#cbd5e1',
+                'fg_button': '#1e293b',
+                'fg_text': '#64748b',
+                'fg_label': '#0f172a',
+                'fg_entry': '#1e293b',
+                'border': '#e2e8f0',
+                'accent': '#0078d4',
+                'primary': '#486966',
+                'primary_hover': '#5a7a77',
+                'status_success': '#15803d',
+                'status_success_bg': '#dcfce7',
+                'status_error': '#dc2626',
+                'status_error_bg': '#fee2e2',
+                'status_warning': '#d97706',
+                'status_warning_bg': '#fef3c7',
+                'status_info_bg': '#dbeafe',
             }
-        
-        # Apply root window background
-        self.root.configure(bg=self.colors['bg_main'])
+        # UI constants for modern look
+        self.corner_radius = 8
+        self.entry_height = 36
+        self.label_font = ("Segoe UI", 11, "bold")
+        self.body_font = ("Segoe UI", 10)
+        self.small_font = ("Segoe UI", 9)
+        self.pad_label = (0, 6)
+        self.pad_section = (0, 16)
+        self.root.configure(fg_color=self.colors['bg_main'])
     
     def load_state(self):
         """Load saved state from config file."""
@@ -178,6 +518,20 @@ class EventFolderGenerator:
         """Handle window closing - save state before exit."""
         self.save_state()
         self.root.destroy()
+    
+    def set_status(self, text, kind="default"):
+        """Update status inline alert (success, error, warning, accent, default)."""
+        self.status_label.configure(text=text)
+        colors_map = {
+            "success": (self.colors['status_success'], self.colors['status_success_bg']),
+            "error": (self.colors['status_error'], self.colors['status_error_bg']),
+            "warning": (self.colors['status_warning'], self.colors['status_warning_bg']),
+            "accent": (self.colors['accent'], self.colors['status_info_bg']),
+            "default": (self.colors['fg_text'], self.colors['status_info_bg']),
+        }
+        text_color, bg_color = colors_map.get(kind, colors_map["default"])
+        self.status_label.configure(text_color=text_color)
+        self.status_alert_frame.configure(fg_color=bg_color)
     
     def setup_menu(self):
         """Create the menu bar."""
@@ -246,448 +600,411 @@ class EventFolderGenerator:
         self.scan_templates()
     
     def setup_ui(self):
-        # Configure ttk styles for theme
+        # ttk progress bar style (indeterminate - CTk has no indeterminate)
         style = ttk.Style()
-        style.theme_use('vista' if sys.platform == 'win32' else 'default')
-        
-        # Configure styles with theme colors
-        style.configure('TFrame', background=self.colors['bg_main'])
-        style.configure('TLabel', background=self.colors['bg_main'], foreground=self.colors['fg_label'])
-        style.configure('TEntry', 
-                       fieldbackground=self.colors['bg_entry'], 
-                       foreground=self.colors['fg_entry'], 
-                       bordercolor=self.colors['border'], 
-                       insertcolor=self.colors['fg_entry'],
-                       selectbackground=self.colors['accent'],
-                       selectforeground='white')
-        style.configure('TButton', background=self.colors['bg_button'], foreground=self.colors['fg_button'],
-                       borderwidth=0, focuscolor='none')
-        style.map('TButton', 
-                  background=[('active', self.colors['bg_button_hover'])],
-                  foreground=[('active', self.colors['fg_button'])])
-        style.configure('TCombobox', 
-                       fieldbackground=self.colors['bg_entry'], 
-                       foreground=self.colors['fg_entry'],
-                       bordercolor=self.colors['border'], 
-                       arrowcolor=self.colors['fg_entry'],
-                       selectbackground=self.colors['accent'],
-                       selectforeground='white')
-        style.map('TCombobox',
-                  fieldbackground=[('readonly', self.colors['bg_entry'])],
-                  foreground=[('readonly', self.colors['fg_entry'])])
         style.configure('TProgressbar', background=self.colors['accent'], troughcolor=self.colors['bg_frame'])
         
-        # Main frame - bg_main color
-        main_frame = tk.Frame(self.root, bg=self.colors['bg_main'], padx=20, pady=20)
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        # Root grid: left form + right preview panel
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_columnconfigure(1, weight=0)
+        self.root.grid_rowconfigure(0, weight=1)
+        
+        # Scrollable main content (scrollbar when content overflows)
+        content_width = 552
+        scrollable_frame = ctk.CTkScrollableFrame(
+            self.root, fg_color="transparent",
+            corner_radius=0, scrollbar_button_color=self.colors['bg_frame'],
+            scrollbar_button_hover_color=self.colors['bg_button_hover']
+        )
+        scrollable_frame.grid(row=0, column=0, sticky="nsew", padx=(24, 12), pady=24)
+        scrollable_frame.grid_columnconfigure(0, weight=1)
+        main_frame = scrollable_frame  # use same variable for rest of setup_ui
+
+        right_panel = ctk.CTkFrame(
+            self.root, fg_color=self.colors['bg_frame'], corner_radius=self.corner_radius,
+            width=self.preview_panel_width, border_width=1, border_color=self.colors['border']
+        )
+        right_panel.grid(row=0, column=1, sticky="ns", padx=(12, 24), pady=24)
+        right_panel.grid_propagate(False)
+        right_panel.grid_columnconfigure(0, weight=1)
+        preview_wrap = self.preview_panel_width - 32
+        
+        # Event Type + Template in one row (2 columns)
         main_frame.grid_columnconfigure(0, weight=1)
-        
-        # Event Type label - fg_label color
-        event_type_label = tk.Label(
-            main_frame, 
-            text="Event Type:", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        main_frame.grid_columnconfigure(1, weight=1)
+        selector_row_width = (content_width - 12) // 2  # half minus gap
+
+        event_type_label = ctk.CTkLabel(
+            main_frame, text="Event Type:",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        event_type_label.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
-        
-        # Template combobox - bg_entry, fg_entry colors
-        self.template_combo = ttk.Combobox(
-            main_frame, 
-            textvariable=self.selected_template,
-            state="readonly",
-            width=57
+        event_type_label.grid(row=0, column=0, sticky="w", pady=self.pad_label)
+
+        template_label2 = ctk.CTkLabel(
+            main_frame, text="Template:",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        self.template_combo.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
-        self.template_combo.bind('<<ComboboxSelected>>', lambda e: (self.on_template_selected(e), self.update_path_preview()))
-        
-        # Template label - fg_label color
-        template_label2 = tk.Label(
-            main_frame, 
-            text="Template:", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        template_label2.grid(row=0, column=1, sticky="w", pady=self.pad_label)
+
+        def on_template_chosen(value):
+            self.on_template_selected(None)
+            self.update_path_preview()
+
+        self.template_combo = RoundedDropdown(
+            main_frame, variable=self.selected_template, values=[],
+            state="readonly", width=selector_row_width, height=self.entry_height,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font, command=on_template_chosen
         )
-        template_label2.grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
-        
-        # Template row frame - holds dropdown and preview button side by side
-        template_row_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
-        template_row_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+        self.template_combo.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=self.pad_section)
+
+        self.subfolder_combo = RoundedDropdown(
+            main_frame, variable=self.selected_subfolder, values=[],
+            state="disabled", width=selector_row_width, height=self.entry_height,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font, command=self.on_subfolder_selected
+        )
+        self.subfolder_combo.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=self.pad_section)
+
+        template_row_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        template_row_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, self.pad_section[1]))
         template_row_frame.grid_columnconfigure(0, weight=1)
-        
-        # Subfolder combobox - bg_entry, fg_entry colors
-        self.subfolder_combo = ttk.Combobox(
-            template_row_frame,
-            textvariable=self.selected_subfolder,
-            state="readonly",
-            width=40
+
+        self.preview_button = ctk.CTkButton(
+            template_row_frame, text="Preview Subfolder Contents",
+            command=self.preview_template, state="disabled",
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=180
         )
-        self.subfolder_combo.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
-        self.subfolder_combo.config(state="disabled")
-        self.subfolder_combo.bind('<<ComboboxSelected>>', self.on_subfolder_selected)
+        self.preview_button.grid(row=0, column=0, sticky="w")
         
-        # Preview button - bg_button color (side by side with dropdown)
-        self.preview_button = tk.Button(
-            template_row_frame,
-            text="Preview Subfolder Contents",
-            command=self.preview_template,
-            state="disabled",
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            disabledforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        # Destination
+        dest_label = ctk.CTkLabel(
+            main_frame, text="Destination Folder:",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        self.preview_button.grid(row=0, column=1, sticky=tk.W)
-        # Bind hover effect
-        def on_preview_enter(e):
-            if self.preview_button['state'] != 'disabled':
-                self.preview_button.config(bg=self.colors['bg_button_hover'])
-        def on_preview_leave(e):
-            if self.preview_button['state'] != 'disabled':
-                self.preview_button.config(bg=self.colors['bg_button'])
-        self.preview_button.bind('<Enter>', on_preview_enter)
-        self.preview_button.bind('<Leave>', on_preview_leave)
+        dest_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=self.pad_label)
         
-        # Destination label - fg_label color
-        dest_label = tk.Label(
-            main_frame, 
-            text="Destination Folder:", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
-        )
-        dest_label.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
-        
-        # Destination frame - bg_frame color
-        dest_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
-        dest_frame.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        dest_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        dest_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=self.pad_section)
         dest_frame.grid_columnconfigure(0, weight=1)
         
-        # Entry field - bg_entry, fg_entry colors
-        dest_entry = ttk.Entry(dest_frame, textvariable=self.destination_path, width=50)
-        dest_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
-        dest_entry.bind('<KeyRelease>', lambda e: self.update_path_preview())
-        dest_entry.bind('<FocusOut>', lambda e: self.update_path_preview())
+        dest_entry = ctk.CTkEntry(
+            dest_frame, textvariable=self.destination_path, width=454, height=self.entry_height,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font
+        )
+        dest_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        dest_entry.bind("<KeyRelease>", lambda e: self.update_path_preview())
+        dest_entry.bind("<FocusOut>", lambda e: self.update_path_preview())
         
-        # Button - bg_button color
-        browse_btn2 = tk.Button(
-            dest_frame, 
-            text="Browse", 
-            command=self.browse_destination_folder,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        browse_btn2 = ctk.CTkButton(
+            dest_frame, text="Browse", command=self.browse_destination_folder,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=90
         )
         browse_btn2.grid(row=0, column=1)
-        # Bind hover effect
-        browse_btn2.bind('<Enter>', lambda e: browse_btn2.config(bg=self.colors['bg_button_hover']))
-        browse_btn2.bind('<Leave>', lambda e: browse_btn2.config(bg=self.colors['bg_button']))
         
-        # Client Name label - fg_label color
-        client_name_label = tk.Label(
-            main_frame, 
-            text="Client Name:", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        # Client Name
+        client_name_label = ctk.CTkLabel(
+            main_frame, text="Client Name:",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        client_name_label.grid(row=7, column=0, sticky=tk.W, pady=(0, 5))
+        client_name_label.grid(row=5, column=0, sticky="w", pady=self.pad_label)
         
-        # Entry field - bg_entry, fg_entry colors
-        folder_entry = ttk.Entry(main_frame, textvariable=self.folder_name, width=57)
-        folder_entry.grid(row=8, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
-        folder_entry.bind('<KeyRelease>', lambda e: self.update_path_preview())
-        folder_entry.bind('<FocusOut>', lambda e: self.update_path_preview())
-        
-        # Event Name label - fg_label color
-        event_name_label = tk.Label(
-            main_frame, 
-            text="Event Name:", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        folder_entry = ctk.CTkEntry(
+            main_frame, textvariable=self.folder_name, width=content_width, height=self.entry_height,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font
         )
-        event_name_label.grid(row=9, column=0, sticky=tk.W, pady=(0, 5))
+        folder_entry.grid(row=6, column=0, columnspan=2, sticky="ew", pady=self.pad_section)
+        folder_entry.bind("<KeyRelease>", lambda e: self.update_path_preview())
+        folder_entry.bind("<FocusOut>", lambda e: self.update_path_preview())
         
-        # Entry field - bg_entry, fg_entry colors
-        subfolder_entry = ttk.Entry(main_frame, textvariable=self.subfolder_name, width=57)
-        subfolder_entry.grid(row=10, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
-        subfolder_entry.bind('<KeyRelease>', lambda e: self.update_path_preview())
-        subfolder_entry.bind('<FocusOut>', lambda e: self.update_path_preview())
+        # Event Name
+        event_name_label = ctk.CTkLabel(
+            main_frame, text="Event Name:",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
+        )
+        event_name_label.grid(row=7, column=0, sticky="w", pady=self.pad_label)
+        
+        subfolder_entry = ctk.CTkEntry(
+            main_frame, textvariable=self.subfolder_name, width=content_width, height=self.entry_height,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font
+        )
+        subfolder_entry.grid(row=8, column=0, columnspan=2, sticky="ew", pady=self.pad_section)
+        subfolder_entry.bind("<KeyRelease>", lambda e: self.update_path_preview())
+        subfolder_entry.bind("<FocusOut>", lambda e: self.update_path_preview())
         
         # Background files section (hidden by default, shown for AI Removal/Greenscreen)
-        self.background_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
-        self.background_frame.grid(row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 15))
+        self.background_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        self.background_frame.grid(row=9, column=0, columnspan=2, sticky="ew", pady=self.pad_section)
         self.background_frame.grid_columnconfigure(0, weight=1)
-        self.background_frame.grid_remove()  # Hidden by default
+        self.background_frame.grid_remove()
         
-        # Background label - fg_label color (will be updated dynamically)
-        self.background_label = tk.Label(
-            self.background_frame,
-            text="Background Images (required: 3-4):",
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        self.background_label = ctk.CTkLabel(
+            self.background_frame, text="Background Images (required: 3-4):",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        self.background_label.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+        self.background_label.grid(row=0, column=0, columnspan=3, sticky="w", pady=self.pad_label)
         
-        # Background files list frame
-        self.background_list_frame = tk.Frame(self.background_frame, bg=self.colors['bg_main'])
-        self.background_list_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 5))
+        self.background_list_frame = ctk.CTkFrame(self.background_frame, fg_color="transparent")
+        self.background_list_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self.background_list_frame.grid_columnconfigure(0, weight=1)
         
-        # Background files listbox
-        self.background_listbox = tk.Listbox(
-            self.background_list_frame,
-            height=3,
-            bg=self.colors['bg_entry'],
-            fg=self.colors['fg_entry'],
-            selectbackground=self.colors['accent'],
-            selectforeground='white',
-            font=("Segoe UI", 9)
+        self.background_textbox = ctk.CTkTextbox(
+            self.background_list_frame, height=72, width=content_width,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            text_color=self.colors['fg_entry'], border_color=self.colors['border'],
+            font=self.small_font, state="disabled", wrap="word"
         )
-        self.background_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        self.background_textbox.grid(row=0, column=0, sticky="ew")
         
-        # Scrollbar for listbox
-        background_scrollbar = tk.Scrollbar(self.background_list_frame, orient=tk.VERTICAL, command=self.background_listbox.yview)
-        background_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        self.background_listbox.config(yscrollcommand=background_scrollbar.set)
+        background_buttons_frame = ctk.CTkFrame(self.background_frame, fg_color="transparent")
+        background_buttons_frame.grid(row=2, column=0, columnspan=3, sticky="w")
         
-        # Background buttons frame
-        background_buttons_frame = tk.Frame(self.background_frame, bg=self.colors['bg_main'])
-        background_buttons_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W)
-        
-        # Add background button
-        self.add_background_btn = tk.Button(
-            background_buttons_frame,
-            text="Add Background Files",
+        self.add_background_btn = ctk.CTkButton(
+            background_buttons_frame, text="Add Background Files",
             command=self.browse_background_files,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=160
         )
-        self.add_background_btn.grid(row=0, column=0, padx=(0, 5))
-        self.add_background_btn.bind('<Enter>', lambda e: self.add_background_btn.config(bg=self.colors['bg_button_hover']))
-        self.add_background_btn.bind('<Leave>', lambda e: self.add_background_btn.config(bg=self.colors['bg_button']))
+        self.add_background_btn.grid(row=0, column=0, padx=(0, 8))
         
-        # Clear background button
-        self.clear_background_btn = tk.Button(
-            background_buttons_frame,
-            text="Clear All",
-            command=self.clear_background_files,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        self.clear_background_btn = ctk.CTkButton(
+            background_buttons_frame, text="Clear All", command=self.clear_background_files,
+            fg_color=self.colors['status_error'], hover_color="#b91c1c",
+            text_color="white", font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=90
         )
         self.clear_background_btn.grid(row=0, column=1)
-        self.clear_background_btn.bind('<Enter>', lambda e: self.clear_background_btn.config(bg=self.colors['bg_button_hover']))
-        self.clear_background_btn.bind('<Leave>', lambda e: self.clear_background_btn.config(bg=self.colors['bg_button']))
         
-        # Overlay label - fg_label color
-        overlay_label = tk.Label(
-            main_frame, 
-            text="Overlay Image (optional):", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        # Overlay Image
+        overlay_label = ctk.CTkLabel(
+            main_frame, text="Overlay Image (optional):",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        overlay_label.grid(row=12, column=0, sticky=tk.W, pady=(0, 5))
+        overlay_label.grid(row=10, column=0, sticky="w", pady=self.pad_label)
         
-        # Overlay frame - bg_frame color
-        overlay_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
-        overlay_frame.grid(row=13, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        overlay_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        overlay_frame.grid(row=11, column=0, columnspan=3, sticky="ew", pady=self.pad_section)
         overlay_frame.grid_columnconfigure(0, weight=1)
         
-        # Entry field - bg_entry, fg_entry colors
-        overlay_entry = ttk.Entry(overlay_frame, textvariable=self.overlay_file_path, width=50, state="readonly")
-        overlay_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        overlay_entry = ctk.CTkEntry(
+            overlay_frame, textvariable=self.overlay_file_path, width=374, height=self.entry_height,
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font, state="disabled"
+        )
+        overlay_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         
-        # Buttons - bg_button color
-        browse_btn3 = tk.Button(
-            overlay_frame, 
-            text="Browse", 
-            command=self.browse_overlay_file,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        browse_btn3 = ctk.CTkButton(
+            overlay_frame, text="Browse", command=self.browse_overlay_file,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=90
         )
         browse_btn3.grid(row=0, column=1)
-        browse_btn3.bind('<Enter>', lambda e: browse_btn3.config(bg=self.colors['bg_button_hover']))
-        browse_btn3.bind('<Leave>', lambda e: browse_btn3.config(bg=self.colors['bg_button']))
         
-        clear_btn = tk.Button(
-            overlay_frame, 
-            text="Clear", 
-            command=self.clear_overlay_file,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        clear_btn = ctk.CTkButton(
+            overlay_frame, text="Clear", command=self.clear_overlay_file,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=70
         )
-        clear_btn.grid(row=0, column=2, padx=(5, 0))
-        clear_btn.bind('<Enter>', lambda e: clear_btn.config(bg=self.colors['bg_button_hover']))
-        clear_btn.bind('<Leave>', lambda e: clear_btn.config(bg=self.colors['bg_button']))
+        clear_btn.grid(row=0, column=2, padx=(8, 0))
         
-        # Overlay Background section (hidden by default, shown for AI Removal/Greenscreen with 2X6/4X6 3/4 shot)
-        self.overlay_background_frame = tk.Frame(main_frame, bg=self.colors['bg_main'])
-        self.overlay_background_frame.grid(row=14, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        # Overlay Background section (hidden by default)
+        self.overlay_background_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        self.overlay_background_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=self.pad_section)
         self.overlay_background_frame.grid_columnconfigure(0, weight=1)
-        self.overlay_background_frame.grid_remove()  # Hidden by default
+        self.overlay_background_frame.grid_remove()
         
-        # Overlay Background label - fg_label color
-        overlay_background_label = tk.Label(
-            self.overlay_background_frame, 
-            text="Overlay Background (optional):", 
-            font=("Segoe UI", 10, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        overlay_background_label = ctk.CTkLabel(
+            self.overlay_background_frame, text="Overlay Background (optional):",
+            font=self.label_font, text_color=self.colors['fg_label'], anchor="w"
         )
-        overlay_background_label.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        overlay_background_label.grid(row=0, column=0, sticky="w", pady=self.pad_label)
         
-        # Overlay Background frame - bg_frame color
-        overlay_background_entry_frame = tk.Frame(self.overlay_background_frame, bg=self.colors['bg_main'])
-        overlay_background_entry_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 0))
+        overlay_background_entry_frame = ctk.CTkFrame(self.overlay_background_frame, fg_color="transparent")
+        overlay_background_entry_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
         overlay_background_entry_frame.grid_columnconfigure(0, weight=1)
         
-        # Entry field - bg_entry, fg_entry colors
-        overlay_background_entry = ttk.Entry(overlay_background_entry_frame, textvariable=self.overlay_background_file_path, width=50, state="readonly")
-        overlay_background_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        overlay_background_entry = ctk.CTkEntry(
+            overlay_background_entry_frame, textvariable=self.overlay_background_file_path,
+            width=374, height=self.entry_height, state="disabled",
+            corner_radius=self.corner_radius, fg_color=self.colors['bg_entry'],
+            border_color=self.colors['border'], text_color=self.colors['fg_entry'],
+            font=self.body_font
+        )
+        overlay_background_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         
-        # Buttons - bg_button color
-        browse_overlay_bg_btn = tk.Button(
-            overlay_background_entry_frame, 
-            text="Browse", 
-            command=self.browse_overlay_background_file,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        browse_overlay_bg_btn = ctk.CTkButton(
+            overlay_background_entry_frame, text="Browse", command=self.browse_overlay_background_file,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=90
         )
         browse_overlay_bg_btn.grid(row=0, column=1)
-        browse_overlay_bg_btn.bind('<Enter>', lambda e: browse_overlay_bg_btn.config(bg=self.colors['bg_button_hover']))
-        browse_overlay_bg_btn.bind('<Leave>', lambda e: browse_overlay_bg_btn.config(bg=self.colors['bg_button']))
         
-        clear_overlay_bg_btn = tk.Button(
-            overlay_background_entry_frame, 
-            text="Clear", 
-            command=self.clear_overlay_background_file,
-            bg=self.colors['bg_button'],
-            fg=self.colors['fg_button'],
-            activebackground=self.colors['bg_button_hover'],
-            activeforeground=self.colors['fg_button'],
-            font=("Segoe UI", 9),
-            relief="flat",
-            padx=10,
-            pady=5,
-            cursor="hand2"
+        clear_overlay_bg_btn = ctk.CTkButton(
+            overlay_background_entry_frame, text="Clear", command=self.clear_overlay_background_file,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.small_font,
+            corner_radius=self.corner_radius, height=36, width=70
         )
-        clear_overlay_bg_btn.grid(row=0, column=2, padx=(5, 0))
-        clear_overlay_bg_btn.bind('<Enter>', lambda e: clear_overlay_bg_btn.config(bg=self.colors['bg_button_hover']))
-        clear_overlay_bg_btn.bind('<Leave>', lambda e: clear_overlay_bg_btn.config(bg=self.colors['bg_button']))
+        clear_overlay_bg_btn.grid(row=0, column=2, padx=(8, 0))
         
-        # Path preview label - shows the full path that will be created
-        path_preview_label = tk.Label(
-            main_frame,
-            text="Path Preview:",
-            font=("Segoe UI", 9, "bold"),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_label']
+        # Status as inline alert (left column)
+        self.status_alert_frame = ctk.CTkFrame(
+            main_frame, fg_color=self.colors['status_info_bg'], corner_radius=self.corner_radius,
+            border_width=0, height=40
         )
-        path_preview_label.grid(row=15, column=0, sticky=tk.W, pady=(10, 5))
+        self.status_alert_frame.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+        self.status_alert_frame.grid_columnconfigure(0, weight=1)
+        self.status_alert_frame.grid_propagate(False)
         
-        # Path preview display - fg_text color, wrapped text
-        self.path_preview = tk.Label(
-            main_frame,
-            text="",
-            font=("Segoe UI", 8),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_text'],
-            wraplength=560,
-            justify=tk.LEFT,
-            anchor=tk.W
+        self.status_label = ctk.CTkLabel(
+            self.status_alert_frame, text="Ready",
+            font=self.small_font, text_color=self.colors['fg_text'],
+            anchor="w", padx=12, pady=10
         )
-        self.path_preview.grid(row=16, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.status_label.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         
-        # Generate button - special color #486966 background, #B2BEBF text
-        self.generate_button = tk.Button(
-            main_frame,
-            text="Generate Event Folder",
-            command=self.generate_folder,
-            bg='#486966',
-            fg='#B2BEBF',
-            activebackground='#5a7a77',
-            activeforeground='#B2BEBF',
-            font=("Segoe UI", 10, "bold"),
-            relief="flat",
-            padx=15,
-            pady=8,
-            cursor="hand2"
-        )
-        self.generate_button.grid(row=17, column=0, columnspan=2, pady=10)
-        # Bind hover effect
-        self.generate_button.bind('<Enter>', lambda e: self.generate_button.config(bg='#5a7a77'))
-        self.generate_button.bind('<Leave>', lambda e: self.generate_button.config(bg='#486966'))
-        
-        # Status label - fg_text color
-        self.status_label = tk.Label(
-            main_frame,
-            text="Ready",
-            font=("Segoe UI", 9),
-            bg=self.colors['bg_main'],
-            fg=self.colors['fg_text']
-        )
-        self.status_label.grid(row=17, column=0, columnspan=2, pady=(10, 0))
-        
-        # Progress bar - accent color
+        # Progress bar (ttk indeterminate)
         self.progress = ttk.Progressbar(
-            main_frame,
-            mode='indeterminate',
-            length=560
+            main_frame, mode='indeterminate', length=content_width
         )
-        self.progress.grid(row=18, column=0, columnspan=2, pady=(10, 0), sticky=(tk.W, tk.E))
-    
+        self.progress.grid(row=14, column=0, columnspan=2, pady=(0, 0), sticky="ew")
+
+        # Right panel: template banner, path preview, combined preview, generate
+        self.template_choice_banner = ctk.CTkFrame(
+            right_panel, fg_color=self.colors['status_warning_bg'], corner_radius=self.corner_radius,
+            border_width=2, border_color=self.colors['status_warning']
+        )
+        self.template_choice_banner.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
+        self.template_choice_banner.grid_columnconfigure(0, weight=1)
+
+        self.template_choice_heading = ctk.CTkLabel(
+            self.template_choice_banner, text="SELECTED TEMPLATE",
+            font=("Segoe UI", 9, "bold"), text_color=self.colors['status_warning'], anchor="w"
+        )
+        self.template_choice_heading.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+
+        self.template_choice_event_caption = ctk.CTkLabel(
+            self.template_choice_banner, text="EVENT TYPE",
+            font=("Segoe UI", 8, "bold"), text_color=self.colors['fg_text'], anchor="w"
+        )
+        self.template_choice_event_caption.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 0))
+
+        self.template_choice_event_type = ctk.CTkLabel(
+            self.template_choice_banner, text="—",
+            font=("Segoe UI", 18, "bold"), text_color=self.colors['fg_label'],
+            anchor="w", justify="left", wraplength=preview_wrap
+        )
+        self.template_choice_event_type.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 6))
+
+        self.template_choice_template_caption = ctk.CTkLabel(
+            self.template_choice_banner, text="TEMPLATE",
+            font=("Segoe UI", 8, "bold"), text_color=self.colors['fg_text'], anchor="w"
+        )
+        self.template_choice_template_caption.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 0))
+
+        self.template_choice_subfolder = ctk.CTkLabel(
+            self.template_choice_banner, text="Choose Event Type & Template",
+            font=("Segoe UI", 14, "bold"), text_color=self.colors['fg_label'],
+            anchor="w", justify="left", wraplength=preview_wrap
+        )
+        self.template_choice_subfolder.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 4))
+
+        self.template_choice_layout = ctk.CTkLabel(
+            self.template_choice_banner, text="",
+            font=("Segoe UI", 11), text_color=self.colors['fg_text'],
+            anchor="w", justify="left", wraplength=preview_wrap
+        )
+        self.template_choice_layout.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 10))
+
+        path_preview_label = ctk.CTkLabel(
+            right_panel, text="Path Preview:",
+            font=("Segoe UI", 10, "bold"), text_color=self.colors['fg_label'], anchor="w"
+        )
+        path_preview_label.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+
+        self.path_preview = ctk.CTkLabel(
+            right_panel, text="", font=self.small_font, text_color=self.colors['fg_text'],
+            anchor="nw", justify="left", wraplength=preview_wrap
+        )
+        self.path_preview.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+
+        preview_label = ctk.CTkLabel(
+            right_panel, text="Layout Preview:",
+            font=("Segoe UI", 10, "bold"), text_color=self.colors['fg_label'], anchor="w"
+        )
+        preview_label.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 6))
+
+        self.preview_frame = ctk.CTkFrame(
+            right_panel, fg_color=self.colors['bg_entry'], corner_radius=self.corner_radius,
+            border_width=1, border_color=self.colors['border'], height=320
+        )
+        self.preview_frame.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.preview_frame.grid_propagate(False)
+        self.preview_frame.grid_columnconfigure(0, weight=1)
+        self.preview_frame.grid_rowconfigure(0, weight=1)
+
+        self.preview_image_label = ctk.CTkLabel(
+            self.preview_frame, text="Select a template subfolder",
+            font=self.small_font, text_color=self.colors['fg_text'],
+            anchor="center", justify="center", wraplength=preview_wrap - 24
+        )
+        self.preview_image_label.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+
+        self.layout_choice_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
+        self.layout_choice_frame.grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.layout_choice_frame.grid_columnconfigure(1, weight=1)
+        self.layout_choice_frame.grid_remove()
+
+        self.layout_prev_btn = ctk.CTkButton(
+            self.layout_choice_frame, text="◀", width=36, height=28,
+            command=self.show_previous_layout_background,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.body_font,
+            corner_radius=self.corner_radius
+        )
+        self.layout_prev_btn.grid(row=0, column=0, padx=(0, 6))
+
+        self.layout_choice_counter = ctk.CTkLabel(
+            self.layout_choice_frame, text="",
+            font=self.small_font, text_color=self.colors['fg_text'], anchor="center"
+        )
+        self.layout_choice_counter.grid(row=0, column=1, sticky="ew")
+
+        self.layout_next_btn = ctk.CTkButton(
+            self.layout_choice_frame, text="▶", width=36, height=28,
+            command=self.show_next_layout_background,
+            fg_color=self.colors['bg_button'], hover_color=self.colors['bg_button_hover'],
+            text_color=self.colors['fg_button'], font=self.body_font,
+            corner_radius=self.corner_radius
+        )
+        self.layout_next_btn.grid(row=0, column=2, padx=(6, 0))
+
+        self.generate_button = ctk.CTkButton(
+            right_panel, text="Generate Event Folder", command=self.generate_folder,
+            fg_color=self.colors['primary'], hover_color=self.colors['primary_hover'],
+            text_color="#e4e4e7", font=("Segoe UI", 11, "bold"),
+            corner_radius=self.corner_radius, height=44, width=preview_wrap
+        )
+        self.generate_button.grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 16))
+
+        self.update_template_choice_banner()
     
     def browse_destination_folder(self):
         folder = filedialog.askdirectory(
@@ -712,10 +1029,12 @@ class EventFolderGenerator:
         )
         if file_path:
             self.overlay_file_path.set(file_path)
+            self.update_preview()
     
     def clear_overlay_file(self):
         """Clear the selected overlay file."""
         self.overlay_file_path.set("")
+        self.update_preview()
     
     def browse_overlay_background_file(self):
         """Browse for overlay background image file."""
@@ -731,16 +1050,18 @@ class EventFolderGenerator:
         )
         if file_path:
             self.overlay_background_file_path.set(file_path)
+            self.update_preview()
     
     def clear_overlay_background_file(self):
         """Clear the selected overlay background file."""
         self.overlay_background_file_path.set("")
+        self.update_preview()
     
     def browse_background_files(self):
         """Browse for background image files (3 or 4 based on template)."""
         # Get required count based on selected subfolder
         subfolder_name = self.selected_subfolder.get()
-        required_count = self.get_required_background_count(subfolder_name)
+        required_count = self.get_required_background_count(subfolder_name, self.selected_template.get())
         
         # Calculate how many more files can be added
         remaining_slots = required_count - len(self.background_files)
@@ -771,19 +1092,49 @@ class EventFolderGenerator:
     def clear_background_files(self):
         """Clear all selected background files."""
         self.background_files = []
+        self.layout_choice_index = 0
         self.update_background_listbox()
     
     def update_background_listbox(self):
         """Update the background files listbox display."""
-        self.background_listbox.delete(0, tk.END)
+        self.background_textbox.configure(state="normal")
+        self.background_textbox.delete("0.0", "end")
         for i, file_path in enumerate(self.background_files, 1):
             filename = os.path.basename(file_path)
-            self.background_listbox.insert(tk.END, f"{i}. {filename}")
+            self.background_textbox.insert("end", f"{i}. {filename}\n")
+        self.background_textbox.configure(state="disabled")
+        self.update_preview()
     
+    def is_trading_cards_ai(self, template_name, subfolder_name):
+        """Trading Cards template with an AI background subfolder."""
+        template_lower = template_name.lower() if template_name else ""
+        subfolder_lower = subfolder_name.lower() if subfolder_name else ""
+        return "trading card" in template_lower and "ai background" in subfolder_lower
+
+    def uses_background1_jpg_naming(self, template_name, subfolder_name):
+        """Background files copy as background1.jpg, background2.jpg, etc."""
+        if self.is_trading_cards_ai(template_name, subfolder_name):
+            return True
+        template_lower = template_name.lower() if template_name else ""
+        subfolder_lower = subfolder_name.lower() if subfolder_name else ""
+        return (
+            "ai removal" in template_lower
+            and (
+                "4x61" in subfolder_lower
+                or (
+                    "4x6" in subfolder_lower
+                    and ("1 shot" in subfolder_lower or "1shot" in subfolder_lower or "1-shot" in subfolder_lower)
+                )
+            )
+        )
+
     def should_show_background_section(self, template_name, subfolder_name=None):
         """Check if background section should be shown for the selected template and subfolder."""
         template_lower = template_name.lower() if template_name else ""
         subfolder_lower = subfolder_name.lower() if subfolder_name else ""
+
+        if self.is_trading_cards_ai(template_name, subfolder_name):
+            return True
         
         # Check if it's AI Removal or Green Screen
         is_ai_or_green = "ai removal" in template_lower or "greenscreen" in template_lower
@@ -806,7 +1157,7 @@ class EventFolderGenerator:
                     return True
         
         # Check for 4X61 shot pattern (no space between 4X6 and 1, only for AI Removal)
-        if "ai removal" in template_lower:
+        if "ai removal" in template_lower or "greenscreen" in template_lower:
             # Check for "4x61 shot" or "4x61shot" (no space)
             if "4x61" in subfolder_lower and ("shot" in subfolder_lower or "1" in subfolder_lower):
                 return True
@@ -817,8 +1168,218 @@ class EventFolderGenerator:
         
         return False
     
-    def get_required_background_count(self, subfolder_name):
-        """Get the required number of background images based on subfolder name."""
+    def uses_background_choice_carousel(self, template_name, subfolder_name):
+        """Subfolders where one background is shown at a time with prev/next arrows."""
+        return "choice" in (subfolder_name or "").lower()
+
+    def get_layout_preview_key(self, template_name, subfolder_name):
+        """Map the selected subfolder to a bundled layout preview image key."""
+        if not subfolder_name:
+            return None
+
+        subfolder_lower = subfolder_name.lower()
+        template_lower = (template_name or "").lower()
+
+        if "trading card" in template_lower:
+            if "ai background choice" in subfolder_lower:
+                return "4X6_1_shot_vertical"
+            return None
+
+        if "vertical squares" in subfolder_lower and "4" in subfolder_lower and "shot" in subfolder_lower:
+            return None
+
+        if "2x6" in subfolder_lower and any(
+            token in subfolder_lower for token in ("3 shot", "4 shot", "3shot", "4shot", "3-shot", "4-shot")
+        ):
+            return "2X6_overlay_layout"
+
+        if "4x6" in subfolder_lower:
+            if any(token in subfolder_lower for token in ("1 shot", "1shot", "1-shot")):
+                if "vertical" in subfolder_lower or "square crop" in subfolder_lower:
+                    return "4X6_1_shot_vertical"
+                if "horizontal" in subfolder_lower or "horzontal" in subfolder_lower:
+                    return "4X6_1_shot_horizontal"
+                return "4X6_1_shot_horizontal"
+            if any(token in subfolder_lower for token in ("3 shot", "3shot", "3-shot")):
+                return "4X6_3_shot_vertical"
+            if any(token in subfolder_lower for token in ("4 shot", "4shot", "4-shot")):
+                return "4X6_4_shot"
+
+        return None
+
+    def get_layout_display_description(self, template_name, subfolder_name):
+        """Human-readable print layout description for the template banner."""
+        layout_key = self.get_layout_preview_key(template_name, subfolder_name)
+        if layout_key:
+            if layout_key == "2X6_overlay_layout":
+                subfolder_lower = (subfolder_name or "").lower()
+                if any(t in subfolder_lower for t in ("3 shot", "3shot", "3-shot")):
+                    return "2×6 Strip — 3 Photos (dual strip)"
+                return "2×6 Strip — 4 Photos (dual strip)"
+            return LAYOUT_DISPLAY_NAMES.get(layout_key, layout_key.replace("_", " "))
+
+        subfolder_lower = (subfolder_name or "").lower()
+        template_lower = (template_name or "").lower()
+        if "trading card" in template_lower:
+            if "ai background choice" in subfolder_lower:
+                return "Trading Card — AI Background Choice"
+            if "ai background removal" in subfolder_lower:
+                return "Trading Card — AI Background Removal"
+            if "non ai" in subfolder_lower:
+                return "Trading Card — Non AI"
+            return "Trading Card"
+        if "vertical squares" in subfolder_lower:
+            return "4×6 — 4 Shot Vertical Squares"
+        return None
+
+    def update_template_choice_banner(self):
+        """Update the prominent selected-template banner above the path preview."""
+        if not hasattr(self, 'template_choice_banner'):
+            return
+
+        template_name = self.selected_template.get()
+        subfolder_name = self.selected_subfolder.get()
+        layout_desc = self.get_layout_display_description(template_name, subfolder_name)
+
+        if template_name and subfolder_name:
+            self.template_choice_banner.configure(
+                fg_color=self.colors['primary'],
+                border_color=self.colors['primary_hover']
+            )
+            caption_color = "#cbd5e1"
+            self.template_choice_heading.configure(text_color="#e4e4e7")
+            self.template_choice_event_caption.configure(text_color=caption_color)
+            self.template_choice_template_caption.configure(text_color=caption_color)
+            self.template_choice_event_type.configure(
+                text=template_name,
+                text_color="#ffffff"
+            )
+            self.template_choice_subfolder.configure(
+                text=subfolder_name,
+                text_color="#ffffff"
+            )
+            layout_text = f"Print Layout: {layout_desc}" if layout_desc else ""
+            self.template_choice_layout.configure(
+                text=layout_text,
+                text_color="#d1d5db"
+            )
+        elif template_name:
+            self.template_choice_banner.configure(
+                fg_color=self.colors['status_warning_bg'],
+                border_color=self.colors['status_warning']
+            )
+            self.template_choice_heading.configure(text_color=self.colors['status_warning'])
+            self.template_choice_event_caption.configure(text_color=self.colors['fg_text'])
+            self.template_choice_template_caption.configure(text_color=self.colors['fg_text'])
+            self.template_choice_event_type.configure(
+                text=template_name,
+                text_color=self.colors['fg_label']
+            )
+            self.template_choice_subfolder.configure(
+                text="Select a Template →",
+                text_color=self.colors['status_warning']
+            )
+            self.template_choice_layout.configure(
+                text="Choose the template subfolder on the left.",
+                text_color=self.colors['fg_text']
+            )
+        else:
+            self.template_choice_banner.configure(
+                fg_color=self.colors['status_warning_bg'],
+                border_color=self.colors['status_warning']
+            )
+            self.template_choice_heading.configure(text_color=self.colors['status_warning'])
+            self.template_choice_event_caption.configure(text_color=self.colors['fg_text'])
+            self.template_choice_template_caption.configure(text_color=self.colors['fg_text'])
+            self.template_choice_event_type.configure(
+                text="—",
+                text_color=self.colors['fg_text']
+            )
+            self.template_choice_subfolder.configure(
+                text="Choose Event Type & Template",
+                text_color=self.colors['fg_label']
+            )
+            self.template_choice_layout.configure(
+                text="Pick both dropdowns on the left before generating.",
+                text_color=self.colors['fg_text']
+            )
+
+    def get_preview_background_files(self):
+        """Background files shown in the choice/carousel preview."""
+        return [path for path in self.background_files if Path(path).exists()]
+
+    def get_preview_overlay_background_path(self):
+        """Single overlay background scaled to fill the entire preview."""
+        overlay_bg = self.overlay_background_file_path.get().strip()
+        if not overlay_bg or not Path(overlay_bg).exists():
+            return None
+        template_name = self.selected_template.get()
+        subfolder_name = self.selected_subfolder.get()
+        if self.should_show_background_section(template_name, subfolder_name):
+            return overlay_bg
+        return None
+
+    def should_preview_slot_backgrounds(self):
+        """Per-slot previews only for choice/carousel templates."""
+        return self.uses_background_choice_carousel(
+            self.selected_template.get(), self.selected_subfolder.get()
+        )
+
+    def build_slot_background_map(self, layout_key):
+        """Assign uploaded backgrounds to layout slot indices."""
+        files = self.get_preview_background_files()
+        subfolder_lower = (self.selected_subfolder.get() or "").lower()
+        mapping = {}
+        slots = LAYOUT_PREVIEWS[layout_key]['slots']
+
+        if layout_key == "2X6_overlay_layout":
+            is_3_shot = any(token in subfolder_lower for token in ("3 shot", "3shot", "3-shot"))
+            pairs = [(0, 1), (2, 3), (4, 5), (6, 7)]
+            pair_count = 3 if is_3_shot else 4
+            for pair_idx in range(pair_count):
+                bg_path = files[pair_idx] if pair_idx < len(files) else None
+                for slot_idx in pairs[pair_idx]:
+                    mapping[slot_idx] = bg_path
+            return mapping
+
+        if layout_key in ("4X6_1_shot_horizontal", "4X6_1_shot_vertical"):
+            if files:
+                if self.uses_background_choice_carousel(
+                    self.selected_template.get(), self.selected_subfolder.get()
+                ):
+                    idx = self.layout_choice_index % len(files)
+                    mapping[0] = files[idx]
+                else:
+                    mapping[0] = files[0]
+            return mapping
+
+        # 3/4 shot slot files are not previewed; overlay background fills the whole canvas.
+        if len(files) == 1 and len(slots) > 1:
+            return mapping
+
+        for slot_idx in range(len(slots)):
+            mapping[slot_idx] = files[slot_idx] if slot_idx < len(files) else None
+        return mapping
+
+    def show_previous_layout_background(self):
+        files = self.get_preview_background_files()
+        if not files:
+            return
+        self.layout_choice_index = (self.layout_choice_index - 1) % len(files)
+        self.update_preview()
+
+    def show_next_layout_background(self):
+        files = self.get_preview_background_files()
+        if not files:
+            return
+        self.layout_choice_index = (self.layout_choice_index + 1) % len(files)
+        self.update_preview()
+    
+    def get_required_background_count(self, subfolder_name, template_name=None):
+        """Get the maximum number of background images based on template and subfolder."""
+        if self.is_trading_cards_ai(template_name, subfolder_name):
+            return 10
+
         subfolder_lower = subfolder_name.lower() if subfolder_name else ""
         
         if "3 shot" in subfolder_lower or "3shot" in subfolder_lower or "3-shot" in subfolder_lower:
@@ -836,11 +1397,11 @@ class EventFolderGenerator:
         template_dir = Path(self.template_path.get())
         
         if not template_dir.exists():
-            self.template_combo['values'] = []
-            self.subfolder_combo.config(state="disabled", values=[])
+            self.template_combo.configure(values=[])
+            self.subfolder_combo.configure(state="disabled", values=[])
             self.selected_subfolder.set("")
-            self.preview_button.config(state="disabled")
-            self.status_label.config(text="Template folder not found", fg=self.colors['status_error'])
+            self.preview_button.configure(state="disabled")
+            self.set_status("Template folder not found", "error")
             return
         
         # Get all folders in the template directory
@@ -850,22 +1411,22 @@ class EventFolderGenerator:
                 if item.is_dir() and not item.name.startswith('.'):
                     templates.append(item.name)
         except PermissionError:
-            self.subfolder_combo.config(state="disabled", values=[])
+            self.subfolder_combo.configure(state="disabled", values=[])
             self.selected_subfolder.set("")
-            self.preview_button.config(state="disabled")
-            self.status_label.config(text="Permission denied accessing template folder", fg=self.colors['status_error'])
+            self.preview_button.configure(state="disabled")
+            self.set_status("Permission denied accessing template folder", "error")
             return
         
         templates.sort()
-        self.template_combo['values'] = templates
+        self.template_combo.configure(values=templates)
         
         if templates:
-            self.status_label.config(text=f"Found {len(templates)} template(s)", fg=self.colors['status_success'])
+            self.set_status(f"Found {len(templates)} template(s)", "success")
         else:
-            self.subfolder_combo.config(state="disabled", values=[])
+            self.subfolder_combo.configure(state="disabled", values=[])
             self.selected_subfolder.set("")
-            self.preview_button.config(state="disabled")
-            self.status_label.config(text="No templates found", fg=self.colors['status_warning'])
+            self.preview_button.configure(state="disabled")
+            self.set_status("No templates found", "warning")
     
     def scan_subfolders(self, template_path):
         """Scan the template folder for available subfolders."""
@@ -884,28 +1445,34 @@ class EventFolderGenerator:
         """Populate subfolder dropdown when template is selected."""
         template_name = self.selected_template.get()
         if not template_name:
-            self.subfolder_combo.config(state="disabled", values=[])
+            self.subfolder_combo.configure(state="disabled", values=[])
             self.selected_subfolder.set("")
-            self.preview_button.config(state="disabled")
+            self.preview_button.configure(state="disabled")
             # Hide background section
             self.background_frame.grid_remove()
+            self.update_preview()
             return
         
         template_dir = Path(self.template_path.get())
         template_path = template_dir / template_name
         
         if not template_path.exists():
-            self.subfolder_combo.config(state="disabled", values=[])
+            self.subfolder_combo.configure(state="disabled", values=[])
             self.selected_subfolder.set("")
-            self.preview_button.config(state="disabled")
+            self.preview_button.configure(state="disabled")
             # Hide background section
             self.background_frame.grid_remove()
+            self.update_preview()
             return
         
         # Show/hide background section based on template and subfolder
         # We'll update this when subfolder is selected
         # For now, just hide it if template doesn't match
-        if "ai removal" in template_name.lower() or "greenscreen" in template_name.lower():
+        if (
+            "ai removal" in template_name.lower()
+            or "greenscreen" in template_name.lower()
+            or "trading card" in template_name.lower()
+        ):
             # Will show when subfolder is selected
             self.background_frame.grid_remove()
             self.overlay_background_frame.grid_remove()
@@ -922,44 +1489,48 @@ class EventFolderGenerator:
         subfolders = self.scan_subfolders(template_path)
         
         if subfolders:
-            self.subfolder_combo.config(state="readonly", values=subfolders)
-            self.status_label.config(
-                text=f"Found {len(subfolders)} subfolder(s) in '{template_name}'",
-                fg=self.colors['status_success']
-            )
+            self.subfolder_combo.configure(state="readonly", values=subfolders)
+            self.set_status(f"Found {len(subfolders)} subfolder(s) in '{template_name}'", "success")
         else:
-            self.subfolder_combo.config(state="disabled", values=[])
+            self.subfolder_combo.configure(state="disabled", values=[])
             self.selected_subfolder.set("")
-            self.status_label.config(
-                text=f"No subfolders found in '{template_name}'",
-                fg=self.colors['status_warning']
-            )
-            self.preview_button.config(state="disabled")
+            self.set_status(f"No subfolders found in '{template_name}'", "warning")
+            self.preview_button.configure(state="disabled")
         
         # Update path preview when template changes
         self.update_path_preview()
+        self.update_preview()
     
     def on_subfolder_selected(self, event=None):
         """Enable preview button when subfolder is selected."""
         if self.selected_subfolder.get():
-            self.preview_button.config(state="normal")
+            self.preview_button.configure(state="normal")
         
         # Show/hide background section based on template and subfolder
         template_name = self.selected_template.get()
         subfolder_name = self.selected_subfolder.get()
+        self.layout_choice_index = 0
         if self.should_show_background_section(template_name, subfolder_name):
             self.background_frame.grid()
             # Update label to show required count or indicate multiple allowed
             subfolder_lower = subfolder_name.lower() if subfolder_name else ""
-            is_1shot = "4x61" in subfolder_lower or "1 shot" in subfolder_lower or "1shot" in subfolder_lower or "1-shot" in subfolder_lower
+            is_multi_background = (
+                self.is_trading_cards_ai(template_name, subfolder_name)
+                or "4x61" in subfolder_lower
+                or "1 shot" in subfolder_lower
+                or "1shot" in subfolder_lower
+                or "1-shot" in subfolder_lower
+            )
             if hasattr(self, 'background_label'):
-                if is_1shot:
-                    self.background_label.config(text="Background Images (multiple allowed):")
+                if self.is_trading_cards_ai(template_name, subfolder_name):
+                    self.background_label.configure(text="Background Images (up to 10):")
+                elif is_multi_background:
+                    self.background_label.configure(text="Background Images (multiple allowed):")
                 else:
-                    required_count = self.get_required_background_count(subfolder_name)
-                    self.background_label.config(text=f"Background Images (required: {required_count}):")
-            # Show overlay background section only for 3/4 shot patterns, not for 1 shot
-            if not is_1shot:
+                    required_count = self.get_required_background_count(subfolder_name, template_name)
+                    self.background_label.configure(text=f"Background Images (required: {required_count}):")
+            # Show overlay background section only for 3/4 shot patterns, not for 1 shot / trading cards
+            if not is_multi_background:
                 self.overlay_background_frame.grid()
             else:
                 self.overlay_background_frame.grid_remove()
@@ -976,6 +1547,7 @@ class EventFolderGenerator:
         # Update window height based on visible sections
         self.update_window_height()
         self.update_path_preview()
+        self.update_preview()
     
     def update_window_height(self):
         """Update window height based on visible sections."""
@@ -1007,11 +1579,118 @@ class EventFolderGenerator:
         if overlay_bg_visible:
             height += 60
         
-        # Update window geometry (keep width at 600)
-        self.root.geometry(f"600x{height}")
+        # Update window geometry
+        self.root.geometry(f"{self.window_width}x{height}")
+    
+    def get_overlay_preview_path(self):
+        """Return custom overlay path or the template subfolder overlay PNG."""
+        custom_overlay = self.overlay_file_path.get().strip()
+        if custom_overlay:
+            overlay_path = Path(custom_overlay)
+            if overlay_path.exists() and overlay_path.is_file():
+                return overlay_path
+
+        template_name = self.selected_template.get()
+        subfolder_name = self.selected_subfolder.get()
+        if not template_name or not subfolder_name:
+            return None
+
+        template_overlay = (
+            Path(self.template_path.get()) / template_name / subfolder_name / "overlay.png"
+        )
+        if template_overlay.exists() and template_overlay.is_file():
+            return template_overlay
+
+        return None
+
+    def update_preview(self):
+        """Update combined layout + overlay preview."""
+        if not hasattr(self, 'preview_image_label'):
+            return
+
+        template_name = self.selected_template.get()
+        subfolder_name = self.selected_subfolder.get()
+        layout_key = self.get_layout_preview_key(template_name, subfolder_name)
+        overlay_path = self.get_overlay_preview_path()
+        uses_carousel = self.uses_background_choice_carousel(template_name, subfolder_name)
+        background_files = self.get_preview_background_files()
+
+        if uses_carousel and background_files:
+            self.layout_choice_frame.grid()
+            idx = self.layout_choice_index % len(background_files)
+            self.layout_choice_counter.configure(text=f"Background {idx + 1} of {len(background_files)}")
+        else:
+            self.layout_choice_frame.grid_remove()
+
+        if not layout_key and not overlay_path:
+            self._preview_image = None
+            self._preview_pil = None
+            self.preview_image_label.configure(
+                image=None,
+                text="Select a template subfolder"
+            )
+            return
+
+        try:
+            composite = None
+            if layout_key:
+                layout_path = get_layout_previews_dir() / LAYOUT_PREVIEWS[layout_key]['file']
+                if not layout_path.exists():
+                    raise FileNotFoundError(f"Missing layout asset: {layout_path.name}")
+                slot_map = (
+                    self.build_slot_background_map(layout_key)
+                    if self.should_preview_slot_backgrounds()
+                    else {}
+                )
+                full_background_path = self.get_preview_overlay_background_path()
+                if overlay_path:
+                    composite = build_combined_preview(
+                        layout_key,
+                        layout_path,
+                        slot_map,
+                        overlay_path,
+                        full_background_path=full_background_path,
+                    )
+                else:
+                    composite = build_layout_composite(
+                        layout_key,
+                        layout_path,
+                        slot_map,
+                        full_background_path=full_background_path,
+                    )
+            elif overlay_path:
+                composite = Image.open(overlay_path).convert('RGBA')
+
+            if composite is None:
+                raise ValueError("No preview available")
+
+            max_w = self.preview_panel_width - 56
+            max_h = 296
+            composite.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+            self._preview_pil = composite.copy()
+            self._preview_image = ctk.CTkImage(
+                light_image=self._preview_pil,
+                dark_image=self._preview_pil,
+                size=(self._preview_pil.width, self._preview_pil.height)
+            )
+            self.preview_image_label.configure(
+                image=self._preview_image,
+                text=""
+            )
+        except Exception as exc:
+            self._preview_image = None
+            self._preview_pil = None
+            message = "Could not render preview"
+            if isinstance(exc, FileNotFoundError):
+                message = str(exc)
+            self.preview_image_label.configure(
+                image=None,
+                text=message
+            )
     
     def update_path_preview(self):
         """Update the path preview display based on current inputs."""
+        self.update_template_choice_banner()
         # Check if path_preview widget exists (might not be created yet during UI setup)
         if not hasattr(self, 'path_preview'):
             return
@@ -1030,7 +1709,7 @@ class EventFolderGenerator:
             main_folder_name = f"{client_name} - {template_name} - {clean_subfolder}"
             # Full path includes event name as subfolder
             full_path = Path(destination) / main_folder_name / event_name
-            self.path_preview.config(text=str(full_path), fg=self.colors['fg_text'])
+            self.path_preview.configure(text=str(full_path), text_color=self.colors['fg_text'])
         else:
             # Show what's missing
             missing = []
@@ -1046,12 +1725,12 @@ class EventFolderGenerator:
                 missing.append("Event Name")
             
             if missing:
-                self.path_preview.config(
+                self.path_preview.configure(
                     text=f"Complete the following: {', '.join(missing)}",
-                    fg=self.colors['status_warning']
+                    text_color=self.colors['status_warning']
                 )
             else:
-                self.path_preview.config(text="", fg=self.colors['fg_text'])
+                self.path_preview.configure(text="", text_color=self.colors['fg_text'])
     
     def get_template_structure(self, template_path):
         """Get the structure of a template folder (subfolders and file counts)."""
@@ -1212,9 +1891,9 @@ class EventFolderGenerator:
             return
         
         # Disable button and show progress
-        self.generate_button.config(state="disabled")
+        self.generate_button.configure(state="disabled")
         self.progress.start()
-        self.status_label.config(text="Copying files...", fg=self.colors['accent'])
+        self.set_status("Copying files...", "accent")
         self.root.update()
         
         # Run copy in a separate thread to keep UI responsive
@@ -1258,14 +1937,9 @@ class EventFolderGenerator:
                         template_name = self.selected_template.get()
                         subfolder_name = self.selected_subfolder.get()
                         subfolder_lower = subfolder_name.lower() if subfolder_name else ""
-                        template_lower = template_name.lower() if template_name else ""
                         
-                        # Check if this is a 4X61 shot (no space) or 4X6 1 shot in AI Removal (simple background naming)
-                        is_4x6_1shot_ai = (
-                            "ai removal" in template_lower and 
-                            ("4x61" in subfolder_lower or ("4x6" in subfolder_lower and ("1 shot" in subfolder_lower or "1shot" in subfolder_lower or "1-shot" in subfolder_lower)))
-                        )
-                        
+                        uses_numbered_backgrounds = self.uses_background1_jpg_naming(template_name, subfolder_name)
+
                         # Check if this is a 3/4 shot pattern (gif/greenscreen naming)
                         is_3_4_shot = (
                             ("3 shot" in subfolder_lower or "3shot" in subfolder_lower or "3-shot" in subfolder_lower) or
@@ -1278,8 +1952,8 @@ class EventFolderGenerator:
                                 # Get the file extension
                                 ext = bg_source.suffix.lower()
                                 
-                                if is_4x6_1shot_ai:
-                                    # For 4X6 1 shot in AI Removal: copy as background1.jpg, background2.jpg, etc.
+                                if uses_numbered_backgrounds:
+                                    # For 4X6 1 shot / Trading Cards AI: copy as background1.jpg, background2.jpg, etc.
                                     bg_dest = event_folder_path / f"background{i}.jpg"
                                     try:
                                         shutil.copy2(bg_source, bg_dest)
@@ -1324,7 +1998,7 @@ class EventFolderGenerator:
     def on_copy_success(self, folder_name, folder_path, file_count, folder_count, event_name, overlay_copied, background_copied=0, overlay_background_copied=False):
         """Handle successful folder creation."""
         self.progress.stop()
-        self.generate_button.config(state="normal")
+        self.generate_button.configure(state="normal")
         
         status_text = f"Successfully created '{folder_name}' ({file_count} files, {folder_count} folders)"
         if overlay_copied:
@@ -1333,7 +2007,7 @@ class EventFolderGenerator:
             status_text += " + background.jpg"
         if background_copied > 0:
             status_text += f" + {background_copied} background file(s)"
-        self.status_label.config(text=status_text, fg=self.colors['status_success'])
+        self.set_status(status_text, "success")
         
         success_msg = f"Event folder '{folder_name}' created successfully!\n\n"
         success_msg += f"Location: {folder_path}\n\n"
@@ -1348,18 +2022,14 @@ class EventFolderGenerator:
                 template_name = self.selected_template.get()
                 subfolder_name = self.selected_subfolder.get()
                 subfolder_lower = subfolder_name.lower() if subfolder_name else ""
-                template_lower = template_name.lower() if template_name else ""
                 
-                is_4x6_1shot_ai = (
-                    "ai removal" in template_lower and 
-                    ("4x61" in subfolder_lower or ("4x6" in subfolder_lower and ("1 shot" in subfolder_lower or "1shot" in subfolder_lower or "1-shot" in subfolder_lower)))
-                )
+                uses_numbered_backgrounds = self.uses_background1_jpg_naming(template_name, subfolder_name)
                 is_3_4_shot = (
                     ("3 shot" in subfolder_lower or "3shot" in subfolder_lower or "3-shot" in subfolder_lower) or
                     ("4 shot" in subfolder_lower or "4shot" in subfolder_lower or "4-shot" in subfolder_lower)
                 )
                 
-                if is_4x6_1shot_ai:
+                if uses_numbered_backgrounds:
                     success_msg += f"\n{background_copied} background image(s) copied as 'background1.jpg', 'background2.jpg', etc."
                 elif is_3_4_shot:
                     success_msg += f"\n{background_copied} background image(s) copied as 'gif_background_1.jpg', 'greenscreen_background_1.jpg', etc."
@@ -1382,13 +2052,13 @@ class EventFolderGenerator:
     def on_copy_error(self, error_msg):
         """Handle copy errors."""
         self.progress.stop()
-        self.generate_button.config(state="normal")
-        self.status_label.config(text="Error occurred", fg=self.colors['status_error'])
+        self.generate_button.configure(state="normal")
+        self.set_status("Error occurred", "error")
         messagebox.showerror("Error", error_msg)
 
 
 def main():
-    root = tk.Tk()
+    root = ctk.CTk()
     app = EventFolderGenerator(root)
     root.mainloop()
 
