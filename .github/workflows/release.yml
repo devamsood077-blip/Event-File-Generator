@@ -1,0 +1,102 @@
+name: Release portables
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build Windows EXE
+        run: python -m PyInstaller --noconfirm --clean EventFileGenerator.spec
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: dist/EventFileGenerator.exe
+
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build macOS app
+        run: python -m PyInstaller --noconfirm --clean EventFileGenerator.spec
+
+      - name: Package app
+        run: |
+          cd dist
+          if [ -d EventFileGenerator.app ]; then
+            ditto -c -k --keepParent EventFileGenerator.app EventFileGenerator-macOS.zip
+          elif [ -f EventFileGenerator ]; then
+            zip EventFileGenerator-macOS.zip EventFileGenerator
+          else
+            echo "No build output found in dist/"
+            ls -la
+            exit 1
+          fi
+
+      - name: Upload Mac artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-portable
+          path: dist/EventFileGenerator-macOS.zip
+
+  publish:
+    needs: [build-windows, build-mac]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          ls -R artifacts
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --target "$GITHUB_SHA" \
+            --title "Event File Generator $TAG" \
+            --generate-notes \
+            artifacts/windows-portable/EventFileGenerator.exe \
+            artifacts/macos-portable/EventFileGenerator-macOS.zip

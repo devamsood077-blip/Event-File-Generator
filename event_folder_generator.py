@@ -12,8 +12,10 @@ from pathlib import Path
 import threading
 import sys
 import json
+import tempfile
 import customtkinter as ctk
 from PIL import Image, ImageDraw
+import updater
 
 LAYOUT_PREVIEWS = {
     '2X6_overlay_layout': {
@@ -377,7 +379,7 @@ class RoundedDropdown(ctk.CTkFrame):
 class EventFolderGenerator:
     def __init__(self, root):
         self.root = root
-        self.root.title("Event File Generator")
+        self.root.title(f"Event File Generator v{updater.APP_VERSION}")
         self.window_width = 920
         self.preview_panel_width = 300
         self.base_height = 840  # Base height without optional sections
@@ -412,6 +414,9 @@ class EventFolderGenerator:
         self._preview_image = None
         self._preview_pil = None
         
+        self.github_token = ""
+        self._update_in_progress = False
+
         # Load saved state
         self.load_state()
         
@@ -494,6 +499,7 @@ class EventFolderGenerator:
                     config = json.load(f)
                     default_template = config.get('template_path', default_template)
                     default_destination = config.get('destination_path', default_destination)
+                    self.github_token = config.get('github_token', "") or ""
             except Exception:
                 # If file is corrupted, use defaults
                 pass
@@ -501,13 +507,26 @@ class EventFolderGenerator:
         self.template_path.set(default_template)
         self.destination_path.set(default_destination)
     
+    def _read_config(self):
+        if not self.config_file.exists():
+            return {}
+        try:
+            with open(self.config_file, 'r') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     def save_state(self):
         """Save current state to config file."""
         try:
-            config = {
-                'template_path': self.template_path.get(),
-                'destination_path': self.destination_path.get()
-            }
+            config = self._read_config()
+            config['template_path'] = self.template_path.get()
+            config['destination_path'] = self.destination_path.get()
+            if self.github_token:
+                config['github_token'] = self.github_token
+            elif 'github_token' in config:
+                del config['github_token']
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception:
@@ -542,6 +561,8 @@ class EventFolderGenerator:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Template Folder Location...", command=self.show_template_folder_dialog)
+        file_menu.add_separator()
+        file_menu.add_command(label="Check for Updates...", command=self.check_for_updates)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         
@@ -580,6 +601,128 @@ class EventFolderGenerator:
                 "Template Folder Updated",
                 f"Template folder location has been set to:\n{folder}\n\nTemplates have been refreshed."
             )
+
+    def _ask_github_token(self):
+        from tkinter import simpledialog
+        token = simpledialog.askstring(
+            "GitHub Token",
+            "This repo is private, so updates need a GitHub personal access token\n"
+            "with repo read access.\n\n"
+            "Create one at github.com/settings/tokens and paste it here:",
+            show="*",
+            parent=self.root,
+        )
+        token = (token or "").strip()
+        if not token:
+            return False
+        self.github_token = token
+        self.save_state()
+        return True
+
+    def check_for_updates(self):
+        """Look for a newer portable on GitHub Releases and install it."""
+        if self._update_in_progress:
+            return
+        self._update_in_progress = True
+        self.set_status("Checking for updates...", "accent")
+
+        def work():
+            try:
+                release = updater.fetch_latest_release(self.github_token)
+                self.root.after(0, lambda r=release: self._on_update_check_result(r, None))
+            except Exception as exc:
+                self.root.after(0, lambda e=exc: self._on_update_check_result(None, e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_check_result(self, release, error):
+        self._update_in_progress = False
+        if error:
+            if isinstance(error, updater.UpdateAuthError):
+                if self._ask_github_token():
+                    self.check_for_updates()
+                    return
+                self.set_status("Update check cancelled", "warning")
+                return
+            self.set_status("Update check failed", "error")
+            messagebox.showerror("Check for Updates", str(error), parent=self.root)
+            return
+
+        latest = release["tag"]
+        if not updater.is_newer(latest):
+            self.set_status(f"Up to date (v{updater.APP_VERSION})", "success")
+            messagebox.showinfo(
+                "Check for Updates",
+                f"You already have the latest version (v{updater.APP_VERSION}).",
+                parent=self.root,
+            )
+            return
+
+        if not updater.is_frozen():
+            self.set_status(f"Update available: {latest}", "warning")
+            messagebox.showinfo(
+                "Update Available",
+                f"Version {latest} is available (you have v{updater.APP_VERSION}).\n\n"
+                "You're running from source, so the portable was not replaced.\n"
+                "Use the built EXE/app, or pull the latest code and rebuild.",
+                parent=self.root,
+            )
+            return
+
+        install = messagebox.askyesno(
+            "Update Available",
+            f"Version {latest} is available (you have v{updater.APP_VERSION}).\n\n"
+            "Download and install it now? The app will restart when it finishes.",
+            parent=self.root,
+        )
+        if not install:
+            self.set_status(f"Update available: {latest}", "warning")
+            return
+        self._download_and_install_update(release)
+
+    def _download_and_install_update(self, release):
+        self._update_in_progress = True
+        self.set_status("Downloading update...", "accent")
+
+        def work():
+            try:
+                asset = updater.matching_asset(release)
+                suffix = ".zip" if sys.platform == "darwin" else ".exe"
+                dest = Path(tempfile.gettempdir()) / f"EventFileGenerator-update{suffix}"
+
+                def progress(read, total):
+                    if total:
+                        pct = int(read * 100 / total)
+                        self.root.after(
+                            0,
+                            lambda p=pct: self.set_status(f"Downloading update... {p}%", "accent"),
+                        )
+
+                updater.download_asset(asset, dest, token=self.github_token, progress_cb=progress)
+                self.root.after(0, lambda d=dest: self._apply_downloaded_update(d, None))
+            except Exception as exc:
+                self.root.after(0, lambda e=exc: self._apply_downloaded_update(None, e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_downloaded_update(self, dest, error):
+        if error:
+            self._update_in_progress = False
+            if isinstance(error, updater.UpdateAuthError) and self._ask_github_token():
+                self.check_for_updates()
+                return
+            self.set_status("Update failed", "error")
+            messagebox.showerror("Check for Updates", str(error), parent=self.root)
+            return
+        try:
+            self.set_status("Installing update...", "accent")
+            self.save_state()
+            updater.launch_replacer(dest)
+            self.root.destroy()
+        except Exception as exc:
+            self._update_in_progress = False
+            self.set_status("Update failed", "error")
+            messagebox.showerror("Check for Updates", str(exc), parent=self.root)
     
     def switch_theme(self, theme):
         """Switch between light and dark theme."""

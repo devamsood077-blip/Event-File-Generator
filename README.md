@@ -33,6 +33,7 @@ Event File Generator/
 - **Run from source:** Double-click `scripts/run_event_generator.bat` or run `python event_folder_generator.py` from this folder.
 - **Build EXE:** Double-click `scripts/build_exe.bat`. The EXE will be in `dist/EventFileGenerator.exe`.
 - **Use pre-built EXE:** Run `dist/EventFileGenerator.exe` (no Python needed).
+- **Updates:** In the app, **File → Check for Updates...** downloads the latest portable from GitHub Releases and replaces this copy.
 
 ### macOS
 

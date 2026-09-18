@@ -10,7 +10,7 @@ from PyInstaller.utils.hooks import collect_all
 
 _datas = []
 _binaries = []
-_hiddenimports = ['customtkinter', 'PIL', 'PIL.Image', 'PIL.ImageDraw']
+_hiddenimports = ['customtkinter', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'updater']
 
 for _pkg in ('customtkinter', 'PIL'):
     try:
